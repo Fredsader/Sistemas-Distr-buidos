@@ -1,0 +1,882 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>P2P File Share</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .panel {
+            padding: 20px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+        button {
+            padding: 10px;
+            margin: 5px;
+            cursor: pointer;
+        }
+        input {
+            padding: 5px;
+            margin: 5px;
+        }
+        .file-list {
+            margin-top: 20px;
+        }
+        .file-item {
+            padding: 10px;
+            border: 1px solid #eee;
+            margin: 5px 0;
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .file-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        #myId {
+            font-family: monospace;
+            padding: 10px;
+            background: #f5f5f5;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        #debug {
+            margin-top: 20px;
+            padding: 10px;
+            background: #f0f0f0;
+            border-radius: 4px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        #status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .error {
+            background-color: #ffebee;
+            color: #c62828;
+        }
+        .success {
+            background-color: #e8f5e9;
+            color: #2e7d32;
+        }
+        .progress-container {
+            width: 100%;
+            background-color: #f0f0f0;
+            border-radius: 4px;
+            margin: 5px 0;
+        }
+        .progress-bar {
+            width: 0%;
+            height: 20px;
+            background-color: #4CAF50;
+            border-radius: 4px;
+            text-align: center;
+            line-height: 20px;
+            color: white;
+            transition: width 0.3s ease;
+        }
+    </style>
+</head>
+<body>
+    <h1>P2P File Share</h1>
+    
+    <div class="container">
+        <div class="panel">
+            <h2>Seu ID</h2>
+            <div id="myId">Iniciando...</div>
+            <button onclick="copyMyId()">Copiar ID</button>
+        </div>
+
+        <div class="panel">
+            <h2>Conectar à Rede</h2>
+            <input type="text" id="peerId" placeholder="ID de um peer conhecido">
+            <button onclick="connect()">Conectar</button>
+            <div id="connectionStatus"></div>
+        </div>
+
+        <div class="panel">
+            <h2>Compartilhar Arquivo</h2>
+            <input type="file" id="fileInput">
+            <button onclick="shareFile()">Compartilhar</button>
+        </div>
+
+        <div class="panel">
+            <h2>Arquivos Disponiveis</h2>
+            <div id="fileList" class="file-list"></div>
+        </div>
+    </div>
+
+    <div id="status"></div>
+    <div id="debug"></div>
+
+    <script>
+        // Função para adicionar logs de debug
+        function debugLog(message) {
+            const debugDiv = document.getElementById('debug');
+            const timestamp = new Date().toLocaleTimeString();
+            debugDiv.innerHTML += `[${timestamp}] ${message}\n`;
+            console.log(message);
+        }
+
+        // Função para atualizar o status
+        function updateStatus(message, isError = false) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.textContent = message;
+            statusDiv.className = isError ? 'error' : 'success';
+        }
+
+        // Função para atualizar o status da conexão
+        function updateConnectionStatus(message, isError = false) {
+            const statusDiv = document.getElementById('connectionStatus');
+            statusDiv.textContent = message;
+            statusDiv.className = isError ? 'error' : 'success';
+        }
+
+        // P2P File Sharing System
+        class P2PFileShare {
+            constructor() {
+                debugLog('Iniciando construtor P2PFileShare');
+                this.peers = new Map();
+                this.files = new Map();
+                this.downloadingFiles = new Map();
+                this.configuration = {
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        { urls: 'stun:stun2.l.google.com:19302' }
+                    ]
+                };
+                this.dht = new Map();
+                this.peerId = this.generatePeerId();
+                this.pendingIceCandidates = new Map();
+                
+                // Configurar listener para sinalização automática
+                this.setupAutoSignaling();
+                debugLog('Construtor P2PFileShare finalizado');
+            }
+
+            setupAutoSignaling() {
+                // Listener para mudanças no localStorage
+                window.addEventListener('storage', (event) => {
+                    if (event.key && event.key.startsWith('p2p_signaling_')) {
+                        try {
+                            const data = JSON.parse(event.newValue);
+                            if (!data) return;
+
+                            debugLog('Recebido sinalização automática: ' + data.type);
+                            
+                            if (data.type === 'offer' && data.to === this.peerId) {
+                                this.handleOffer(data, data.from);
+                            } else if (data.type === 'answer' && data.to === this.peerId) {
+                                this.handleAnswer(data, data.from);
+                            }
+                        } catch (error) {
+                            debugLog('Erro ao processar sinalização automática: ' + error.message);
+                        }
+                    }
+                });
+            }
+
+            // Envia sinalização através do localStorage
+            sendSignaling(data) {
+                const key = 'p2p_signaling_' + Date.now();
+                localStorage.setItem(key, JSON.stringify(data));
+                // Limpar após 5 segundos
+                setTimeout(() => localStorage.removeItem(key), 5000);
+            }
+
+            generatePeerId() {
+                const id = Math.random().toString(36).substring(2, 15);
+                debugLog('ID gerado: ' + id);
+                return id;
+            }
+
+            async init() {
+                debugLog('Iniciando método init()');
+                try {
+                    debugLog('ID atual: ' + this.peerId);
+                    return this.peerId;
+                } catch (error) {
+                    debugLog('Erro no init(): ' + error.message);
+                    throw error;
+                }
+            }
+
+            async connectToPeer(peerId) {
+                if (this.peers.has(peerId)) {
+                    debugLog('Já conectado ao peer: ' + peerId);
+                    updateStatus('Já conectado a este peer');
+                    return;
+                }
+
+                debugLog('Conectando ao peer: ' + peerId);
+                updateStatus('Conectando ao peer: ' + peerId);
+
+                const connection = new RTCPeerConnection(this.configuration);
+                this.peers.set(peerId, connection);
+
+                // Configurar handlers de eventos
+                this.setupConnectionHandlers(connection, peerId);
+
+                try {
+                    // Criar canal de dados
+                    const dataChannel = connection.createDataChannel('fileTransfer', {
+                        ordered: true,
+                        maxRetransmits: 3
+                    });
+                    this.setupDataChannel(dataChannel, peerId);
+
+                    // Criar e enviar oferta
+                    const offer = await connection.createOffer();
+                    await connection.setLocalDescription(offer);
+
+                    // Aguardar coleta completa de candidatos ICE
+                    await this.waitForIceGathering(connection);
+
+                    const offerMessage = {
+                        type: 'offer',
+                        offer: offer,
+                        from: this.peerId,
+                        to: peerId,
+                        iceCandidates: connection.iceCandidates || []
+                    };
+
+                    // Enviar oferta automaticamente
+                    this.sendSignaling(offerMessage);
+                    updateStatus('Oferta enviada automaticamente. Aguardando resposta...');
+                } catch (error) {
+                    debugLog('Erro ao criar oferta: ' + error.message);
+                    updateStatus('Erro ao conectar: ' + error.message, true);
+                    this.cleanupConnection(peerId);
+                }
+            }
+
+            // Aguarda a coleta completa de candidatos ICE
+            waitForIceGathering(connection) {
+                return new Promise((resolve) => {
+                    if (connection.iceGatheringState === 'complete') {
+                        resolve();
+                        return;
+                    }
+
+                    const checkState = () => {
+                        if (connection.iceGatheringState === 'complete') {
+                            resolve();
+                        }
+                    };
+
+                    connection.onicegatheringstatechange = checkState;
+                    // Timeout de segurança após 5 segundos
+                    setTimeout(resolve, 5000);
+                });
+            }
+
+            setupConnectionHandlers(connection, peerId) {
+                // Armazenar candidatos ICE
+                connection.iceCandidates = [];
+                connection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        debugLog('Novo ICE candidate para: ' + peerId + ' - ' + event.candidate.candidate);
+                        connection.iceCandidates.push(event.candidate);
+                    } else {
+                        debugLog('Coleta de ICE candidates concluída');
+                    }
+                };
+
+                connection.onconnectionstatechange = () => {
+                    debugLog('Estado da conexão com ' + peerId + ': ' + connection.connectionState);
+                    if (connection.connectionState === 'connected') {
+                        updateStatus('Conexão estabelecida com: ' + peerId);
+                    } else if (connection.connectionState === 'failed' || connection.connectionState === 'disconnected') {
+                        updateStatus('Conexão falhou com: ' + peerId, true);
+                        this.cleanupConnection(peerId);
+                    }
+                };
+
+                connection.oniceconnectionstatechange = () => {
+                    debugLog('Estado ICE com ' + peerId + ': ' + connection.iceConnectionState);
+                    if (connection.iceConnectionState === 'failed') {
+                        this.cleanupConnection(peerId);
+                    }
+                };
+
+                connection.ondatachannel = (event) => {
+                    debugLog('Canal de dados recebido de: ' + peerId);
+                    this.setupDataChannel(event.channel, peerId);
+                };
+            }
+
+            // Limpa recursos quando uma conexão é fechada
+            cleanupConnection(peerId) {
+                const connection = this.peers.get(peerId);
+                if (connection) {
+                    if (connection.dataChannel) {
+                        connection.dataChannel.close();
+                    }
+                    connection.close();
+                    this.peers.delete(peerId);
+                    debugLog('Conexão limpa para: ' + peerId);
+                }
+            }
+
+            setupDataChannel(dataChannel, peerId) {
+                debugLog('Configurando canal de dados para: ' + peerId);
+                
+                dataChannel.onopen = () => {
+                    debugLog('Canal de dados aberto para: ' + peerId);
+                    updateStatus('Canal de dados aberto com: ' + peerId);
+                    
+                    // Compartilha entradas DHT quando o canal é aberto
+                    this.shareDHTEntries(dataChannel);
+                };
+
+                dataChannel.onmessage = (event) => {
+                    try {
+                        const message = JSON.parse(event.data);
+                        debugLog('Mensagem recebida de ' + peerId + ': ' + JSON.stringify(message));
+                        this.handleMessage(message, peerId);
+                    } catch (error) {
+                        debugLog('Erro ao processar mensagem: ' + error.message);
+                    }
+                };
+
+                dataChannel.onerror = (error) => {
+                    debugLog('Erro no canal de dados para ' + peerId + ': ' + error);
+                    updateStatus('Erro na conexão com peer: ' + peerId, true);
+                };
+
+                dataChannel.onclose = () => {
+                    debugLog('Canal de dados fechado para: ' + peerId);
+                    updateStatus('Conexão fechada com peer: ' + peerId);
+                };
+
+                const connection = this.peers.get(peerId);
+                if (connection) {
+                    connection.dataChannel = dataChannel;
+                }
+            }
+
+            async handleOffer(offer, fromPeerId) {
+                debugLog('Recebendo oferta de conexão de: ' + fromPeerId);
+                updateStatus('Recebendo conexão de: ' + fromPeerId);
+
+                const connection = new RTCPeerConnection(this.configuration);
+                this.peers.set(fromPeerId, connection);
+
+                // Configurar handlers de eventos
+                this.setupConnectionHandlers(connection, fromPeerId);
+
+                try {
+                    // Processar oferta
+                    await connection.setRemoteDescription(new RTCSessionDescription(offer.offer));
+                    debugLog('Descrição remota definida com sucesso');
+
+                    // Adicionar candidatos ICE da oferta
+                    if (offer.iceCandidates && offer.iceCandidates.length > 0) {
+                        debugLog('Adicionando ' + offer.iceCandidates.length + ' candidatos ICE da oferta');
+                        for (const candidate of offer.iceCandidates) {
+                            await connection.addIceCandidate(new RTCIceCandidate(candidate));
+                        }
+                    }
+
+                    // Criar e enviar resposta
+                    const answer = await connection.createAnswer();
+                    await connection.setLocalDescription(answer);
+
+                    // Aguardar coleta completa de candidatos ICE
+                    await this.waitForIceGathering(connection);
+
+                    const answerMessage = {
+                        type: 'answer',
+                        answer: answer,
+                        from: this.peerId,
+                        to: fromPeerId,
+                        iceCandidates: connection.iceCandidates || []
+                    };
+
+                    // Enviar resposta automaticamente
+                    this.sendSignaling(answerMessage);
+                    updateStatus('Resposta enviada automaticamente');
+                } catch (error) {
+                    debugLog('Erro ao processar oferta: ' + error.message);
+                    updateStatus('Erro ao processar conexão: ' + error.message, true);
+                }
+            }
+
+            async handleAnswer(answer, fromPeerId) {
+                debugLog('Recebendo resposta de: ' + fromPeerId);
+                const connection = this.peers.get(fromPeerId);
+                if (!connection) {
+                    debugLog('Conexão não encontrada para: ' + fromPeerId);
+                    updateStatus('Conexão não encontrada', true);
+                    return;
+                }
+
+                try {
+                    // Processar resposta
+                    await connection.setRemoteDescription(new RTCSessionDescription(answer.answer));
+                    debugLog('Descrição remota definida com sucesso');
+
+                    // Adicionar candidatos ICE da resposta
+                    if (answer.iceCandidates && answer.iceCandidates.length > 0) {
+                        debugLog('Adicionando ' + answer.iceCandidates.length + ' candidatos ICE da resposta');
+                        for (const candidate of answer.iceCandidates) {
+                            await connection.addIceCandidate(new RTCIceCandidate(candidate));
+                        }
+                    }
+
+                    updateStatus('Conexão estabelecida com: ' + fromPeerId);
+                } catch (error) {
+                    debugLog('Erro ao processar resposta: ' + error.message);
+                    updateStatus('Erro ao estabelecer conexão: ' + error.message, true);
+                }
+            }
+
+            handleMessage(message, fromPeerId) {
+                debugLog('Processando mensagem do tipo: ' + message.type + ' de: ' + fromPeerId);
+                
+                switch (message.type) {
+                    case 'file-announce':
+                        this.handleFileAnnounce(message.fileInfo);
+                        break;
+                    case 'file-request':
+                        this.handleFileRequest(message.fileId, fromPeerId);
+                        break;
+                    case 'file-chunk':
+                        this.handleFileChunk(message.fileId, message.chunk, message.index);
+                        break;
+                    case 'dht-update':
+                        this.handleDHTUpdate(message.entries);
+                        break;
+                    case 'ping':
+                        this.sendToPeer(fromPeerId, { type: 'pong' });
+                        break;
+                    case 'pong':
+                        debugLog('Pong recebido de: ' + fromPeerId);
+                        break;
+                    default:
+                        debugLog('Tipo de mensagem desconhecido: ' + message.type);
+                }
+            }
+
+            handleFileAnnounce(fileInfo) {
+                debugLog('Recebendo anúncio de arquivo: ' + JSON.stringify(fileInfo));
+                this.dht.set(fileInfo.id, fileInfo);
+                debugLog('Arquivo adicionado à DHT local');
+                updateFileList();
+                updateStatus('Novo arquivo disponível: ' + fileInfo.name);
+            }
+
+            async shareFile(file) {
+                try {
+                    debugLog('Iniciando compartilhamento do arquivo: ' + file.name);
+                    const fileId = await this.hashFile(file);
+                    const fileInfo = {
+                        id: fileId,
+                        name: file.name,
+                        size: file.size,
+                        chunks: Math.ceil(file.size / (1024 * 1024)),
+                        owner: this.peerId
+                    };
+
+                    this.dht.set(fileId, fileInfo);
+                    this.files.set(fileId, file);
+                    
+                    debugLog('Anunciando arquivo para a rede');
+                    let announced = false;
+                    for (const [peerId, connection] of this.peers) {
+                        if (connection.dataChannel && connection.dataChannel.readyState === 'open') {
+                            debugLog('Enviando anúncio para peer: ' + peerId);
+                            this.sendToPeer(peerId, {
+                                type: 'file-announce',
+                                fileInfo: fileInfo
+                            });
+                            announced = true;
+                        } else {
+                            debugLog('Canal de dados não está aberto para peer: ' + peerId + ' (estado: ' + (connection.dataChannel ? connection.dataChannel.readyState : 'não criado') + ')');
+                        }
+                    }
+
+                    if (!announced) {
+                        debugLog('Nenhum peer conectado para anunciar o arquivo');
+                    }
+
+                    updateFileList();
+                    updateStatus('Arquivo compartilhado: ' + file.name);
+                } catch (error) {
+                    debugLog('Erro ao compartilhar arquivo: ' + error.message);
+                    updateStatus('Erro ao compartilhar arquivo: ' + error.message, true);
+                }
+            }
+
+            async requestFile(fileId) {
+                const fileInfo = this.dht.get(fileId);
+                if (!fileInfo) {
+                    debugLog('Arquivo não encontrado na rede: ' + fileId);
+                    updateStatus('Arquivo não encontrado na rede', true);
+                    return;
+                }
+
+                const peersWithFile = Array.from(this.peers.entries())
+                    .filter(([_, connection]) => connection.dataChannel && connection.dataChannel.readyState === 'open');
+
+                if (peersWithFile.length === 0) {
+                    debugLog('Nenhum peer disponível para download');
+                    updateStatus('Nenhum peer disponível para download', true);
+                    return;
+                }
+
+                debugLog('Solicitando arquivo: ' + fileInfo.name);
+                const [peerId, connection] = peersWithFile[Math.floor(Math.random() * peersWithFile.length)];
+                
+                // Inicializa o download
+                if (this.downloadingFiles.has(fileId)) {
+                    debugLog('Download já em andamento para: ' + fileId);
+                    updateStatus('Download já em andamento', true);
+                    return;
+                }
+
+                this.downloadingFiles.set(fileId, {
+                    info: fileInfo,
+                    chunks: new Array(fileInfo.chunks),
+                    received: 0,
+                    startTime: Date.now()
+                });
+                
+                // Resetar a barra de progresso
+                this.updateDownloadProgress(fileId, 0);
+                
+                connection.dataChannel.send(JSON.stringify({
+                    type: 'file-request',
+                    fileId: fileId,
+                    from: this.peerId
+                }));
+                updateStatus('Download iniciado: ' + fileInfo.name);
+            }
+
+            handleFileChunk(fileId, chunk, index) {
+                if (!this.downloadingFiles.has(fileId)) {
+                    debugLog('Recebido chunk para download não iniciado: ' + fileId);
+                    return;
+                }
+
+                const download = this.downloadingFiles.get(fileId);
+                
+                // Verificar se o chunk já foi recebido
+                if (download.chunks[index]) {
+                    debugLog('Chunk ' + index + ' já recebido, ignorando duplicata');
+                    return;
+                }
+
+                download.chunks[index] = new Uint8Array(chunk);
+                download.received++;
+
+                // Atualizar progresso do download
+                const progress = (download.received / download.info.chunks) * 100;
+                this.updateDownloadProgress(fileId, progress);
+
+                debugLog('Recebido chunk ' + (index + 1) + ' de ' + download.info.chunks + ' (' + progress.toFixed(1) + '%)');
+
+                if (download.received === download.info.chunks) {
+                    this.finalizeDownload(fileId, download);
+                }
+            }
+
+            finalizeDownload(fileId, download) {
+                try {
+                    debugLog('Finalizando download: ' + download.info.name);
+                    const blob = new Blob(download.chunks);
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = download.info.name;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    
+                    const duration = (Date.now() - download.startTime) / 1000;
+                    const speed = download.info.size / duration / 1024; // KB/s
+                    
+                    updateStatus(`Download concluído: ${download.info.name} (${speed.toFixed(1)} KB/s)`);
+                    this.downloadingFiles.delete(fileId);
+                } catch (error) {
+                    debugLog('Erro ao finalizar download: ' + error.message);
+                    updateStatus('Erro ao finalizar download: ' + error.message, true);
+                }
+            }
+
+            updateDownloadProgress(fileId, progress) {
+                const downloadElement = document.querySelector(`[data-file-id="${fileId}"]`);
+                if (downloadElement) {
+                    const progressBar = downloadElement.querySelector('.progress-bar');
+                    if (progressBar) {
+                        progressBar.style.width = progress + '%';
+                        progressBar.textContent = progress.toFixed(1) + '%';
+                    }
+                }
+            }
+
+            async handleFileRequest(fileId, fromPeerId) {
+                debugLog('Recebendo solicitação de arquivo de: ' + fromPeerId);
+                const file = this.files.get(fileId);
+                if (!file) {
+                    debugLog('Arquivo não encontrado localmente: ' + fileId);
+                    return;
+                }
+
+                const chunkSize = 64 * 1024; // 64KB
+                const totalChunks = Math.ceil(file.size / chunkSize);
+                debugLog('Enviando arquivo em ' + totalChunks + ' chunks');
+
+                // Enviar chunks em sequência com controle de fluxo
+                for (let i = 0; i < totalChunks; i++) {
+                    const start = i * chunkSize;
+                    const end = Math.min(start + chunkSize, file.size);
+                    const chunk = file.slice(start, end);
+
+                    try {
+                        await this.sendChunk(chunk, fileId, i, fromPeerId);
+                        // Pequena pausa para controle de fluxo
+                        await new Promise(resolve => setTimeout(resolve, 10));
+                    } catch (error) {
+                        debugLog('Erro ao enviar chunk ' + i + ': ' + error.message);
+                        // Tentar reenviar o chunk uma vez
+                        try {
+                            await this.sendChunk(chunk, fileId, i, fromPeerId);
+                        } catch (retryError) {
+                            debugLog('Falha no reenvio do chunk ' + i);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            sendChunk(chunk, fileId, index, peerId) {
+                return new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        try {
+                            const arrayBuffer = e.target.result;
+                            const uint8Array = new Uint8Array(arrayBuffer);
+                            const array = Array.from(uint8Array);
+                            
+                            this.sendToPeer(peerId, {
+                                type: 'file-chunk',
+                                fileId: fileId,
+                                chunk: array,
+                                index: index
+                            });
+                            resolve();
+                        } catch (error) {
+                            reject(error);
+                        }
+                    };
+                    reader.onerror = reject;
+                    reader.readAsArrayBuffer(chunk);
+                });
+            }
+
+            async hashFile(file) {
+                const buffer = await file.arrayBuffer();
+                const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+                return Array.from(new Uint8Array(hashBuffer))
+                    .map(b => b.toString(16).padStart(2, '0'))
+                    .join('');
+            }
+
+            shareDHTEntries(dataChannel) {
+                const entries = Array.from(this.dht.entries());
+                debugLog('Compartilhando ' + entries.length + ' entradas da DHT');
+                if (entries.length > 0) {
+                    debugLog('Entradas da DHT: ' + JSON.stringify(entries));
+                }
+                dataChannel.send(JSON.stringify({
+                    type: 'dht-update',
+                    entries: entries
+                }));
+            }
+
+            handleDHTUpdate(entries) {
+                debugLog('Recebendo atualização da DHT com ' + entries.length + ' entradas');
+                let updated = false;
+                for (const [key, value] of entries) {
+                    if (!this.dht.has(key)) {
+                        this.dht.set(key, value);
+                        debugLog('Nova entrada adicionada à DHT local: ' + key);
+                        updated = true;
+                    }
+                }
+                if (updated) {
+                    updateFileList();
+                }
+            }
+
+            sendToPeer(peerId, message) {
+                const connection = this.peers.get(peerId);
+                if (connection && connection.dataChannel && connection.dataChannel.readyState === 'open') {
+                    debugLog('Enviando mensagem para: ' + peerId + ' - ' + JSON.stringify(message));
+                    connection.dataChannel.send(JSON.stringify(message));
+                } else {
+                    debugLog('Canal de dados não está aberto para: ' + peerId);
+                }
+            }
+
+            // Método para enviar pings periódicos para manter conexões ativas
+            pingAllPeers() {
+                for (const [peerId, connection] of this.peers) {
+                    if (connection.dataChannel && connection.dataChannel.readyState === 'open') {
+                        this.sendToPeer(peerId, { type: 'ping' });
+                    }
+                }
+            }
+        }
+
+        let p2p;
+
+        // Inicializa o sistema P2P
+        async function initializeP2P() {
+            debugLog('Iniciando P2P...');
+            try {
+                debugLog('Criando instância P2PFileShare...');
+                p2p = new P2PFileShare();
+                
+                debugLog('Chamando p2p.init()...');
+                const myId = await p2p.init();
+                
+                debugLog('ID recebido: ' + myId);
+                document.getElementById('myId').textContent = myId;
+                
+                debugLog('P2P inicializado com sucesso!');
+                updateStatus('Sistema P2P inicializado com sucesso');
+                
+                // Configura ping periódico para manter conexões
+                setInterval(() => {
+                    p2p.pingAllPeers();
+                }, 30000);
+            } catch (error) {
+                debugLog('ERRO na inicialização: ' + error.message);
+                console.error('Erro ao inicializar P2P:', error);
+                document.getElementById('myId').textContent = 'Erro ao inicializar';
+                updateStatus('Erro ao inicializar: ' + error.message, true);
+            }
+        }
+
+        // Inicia o sistema quando a página carregar
+        window.onload = () => {
+            debugLog('Página carregada, iniciando P2P...');
+            initializeP2P();
+        };
+
+        // Copia o ID para a área de transferência
+        function copyMyId() {
+            const myId = document.getElementById('myId').textContent;
+            if (myId === 'Iniciando...' || myId === 'Erro ao inicializar') {
+                alert('Aguarde o ID ser gerado');
+                return;
+            }
+            navigator.clipboard.writeText(myId);
+            updateStatus('ID copiado para a área de transferência');
+        }
+
+        // Conecta com outro peer
+        async function connect() {
+            const peerId = document.getElementById('peerId').value;
+            if (!peerId) {
+                updateConnectionStatus('Digite o ID do peer', true);
+                return;
+            }
+            try {
+                debugLog('Tentando conectar ao peer: ' + peerId);
+                updateConnectionStatus('Conectando...');
+                await p2p.connectToPeer(peerId);
+            } catch (error) {
+                debugLog('Erro ao conectar: ' + error.message);
+                updateConnectionStatus('Erro ao conectar: ' + error.message, true);
+            }
+        }
+
+        // Compartilha um arquivo
+        async function shareFile() {
+            const fileInput = document.getElementById('fileInput');
+            if (!fileInput.files.length) {
+                updateStatus('Selecione um arquivo', true);
+                return;
+            }
+            try {
+                debugLog('Iniciando compartilhamento de arquivo...');
+                await p2p.shareFile(fileInput.files[0]);
+            } catch (error) {
+                debugLog('Erro ao compartilhar arquivo: ' + error.message);
+                updateStatus('Erro ao compartilhar arquivo: ' + error.message, true);
+            }
+        }
+
+        // Atualiza a lista de arquivos disponíveis
+        function updateFileList() {
+            const fileList = document.getElementById('fileList');
+            fileList.innerHTML = '';
+            
+            for (const [fileId, fileInfo] of p2p.dht) {
+                const div = document.createElement('div');
+                div.className = 'file-item';
+                div.setAttribute('data-file-id', fileId);
+                
+                const fileInfoDiv = document.createElement('div');
+                fileInfoDiv.className = 'file-info';
+                fileInfoDiv.innerHTML = `
+                    <span>${fileInfo.name} (${formatSize(fileInfo.size)})</span>
+                    <button onclick="downloadFile('${fileId}')">Baixar</button>
+                `;
+                
+                const progressContainer = document.createElement('div');
+                progressContainer.className = 'progress-container';
+                const progressBar = document.createElement('div');
+                progressBar.className = 'progress-bar';
+                progressBar.textContent = '0%';
+                progressContainer.appendChild(progressBar);
+                
+                div.appendChild(fileInfoDiv);
+                div.appendChild(progressContainer);
+                fileList.appendChild(div);
+            }
+        }
+
+        // Formata o tamanho do arquivo
+        function formatSize(bytes) {
+            const units = ['B', 'KB', 'MB', 'GB'];
+            let size = bytes;
+            let unitIndex = 0;
+            while (size >= 1024 && unitIndex < units.length - 1) {
+                size /= 1024;
+                unitIndex++;
+            }
+            return `${size.toFixed(1)} ${units[unitIndex]}`;
+        }
+
+        // Baixa um arquivo
+        async function downloadFile(fileId) {
+            try {
+                debugLog('Iniciando download do arquivo: ' + fileId);
+                await p2p.requestFile(fileId);
+            } catch (error) {
+                debugLog('Erro ao baixar arquivo: ' + error.message);
+                updateStatus('Erro ao baixar arquivo: ' + error.message, true);
+            }
+        }
+    </script>
+</body>
+</html>
